@@ -1,0 +1,51 @@
+[project]
+name = "policy-copilot-rag-service"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "jhamez-cloud", email = "jameskekeli12@gmail.com" }
+]
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "chromadb==0.4.22",
+    "fastapi>=0.162.0",
+    "huggingface-hub<0.26",
+    "langchain==0.1.0",
+    "numpy>=1.26.0,<2",
+    "openai>=3.45.0",
+    "psycopg[binary]>=3.3.8",
+    "pydantic-settings>=2.16.2",
+    "python-multipart>=0.0.33",
+    "sentence-transformers==2.2.2",
+    "sqlalchemy>=2.1.8",
+    "torch>=2.15.0",
+    "torchvision>=0.29.2",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+policy-copilot-rag-service = "policy_copilot_rag_service:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+]
