@@ -16,7 +16,7 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
-    database_url:str = "postgresql://neondb_owner:npg_amq1shQ5oGlx@ep-dark-field-za8kz1ip-pooler.c-2.eu-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+    database_url:str = "postgresql://wertyuioplkjhgfdsazxcvbnm"
 
     admin_api_key: str = ""
     cors_allowed_origins: str = "http://localhost:3000"
