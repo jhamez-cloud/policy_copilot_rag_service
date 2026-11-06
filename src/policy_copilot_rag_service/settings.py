@@ -16,7 +16,7 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
-    database_url:str = "postgresql://wertyuioplkjhgfdsazxcvbnm"
+    neon_database_url: str
 
     admin_api_key: str = ""
     cors_allowed_origins: str = "http://localhost:3000"
