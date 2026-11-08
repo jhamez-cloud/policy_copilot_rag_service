@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore"
+        extra="ignore",
     )
 
     neon_database_url: str
@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 1000
     llm_timeout_seconds: float = 30.0
 
-    @field_validator("database_url")
+    @field_validator("neon_database_url")
     @classmethod
     def _use_psycopg3_driver(cls,db_url: str):
         if db_url.startswith("postgres://"):
