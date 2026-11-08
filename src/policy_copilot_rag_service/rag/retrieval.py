@@ -17,9 +17,9 @@ class VectorDatabase:
     '''Documentation String'''
     def __init__(self,collection_name:str,metric:str = "cosine"):
         self._client = chromadb.Client()
-        self._collection = self._create()
         self._name = collection_name
         self._metric = metric
+        self._collection = self._create()
 
     def _create(self):
         return self._client.get_or_create_collection(

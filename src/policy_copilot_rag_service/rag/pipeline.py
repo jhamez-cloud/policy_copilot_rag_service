@@ -23,7 +23,7 @@ class Answer:
 
 class RagPipeline:
     '''Documentation String'''
-    def __int__(self,vector_db: VectorDatabase | None = None):
+    def __init__(self,vector_db: VectorDatabase | None = None):
         settings = get_settings()
         self.vector_db = vector_db or VectorDatabase(settings.collection_name,settings.similarity_metric)
         self._write_lock = threading.Lock()
