@@ -1,172 +1,153 @@
-# Policy RAG API
+# Policy Copilot RAG Service
 
-A FastAPI backend that answers employee questions about company policies using Retrieval-Augmented Generation (RAG). Documents live in a **Neon Postgres** database, and new documents can be uploaded through the API and become searchable immediately.
+A Python 3.11 FastAPI service for querying a document collection with retrieval-augmented generation (RAG). PostgreSQL stores the source documents; an in-memory Chroma collection stores searchable chunks and is rebuilt from PostgreSQL when the service starts. Answers are generated with Google's Gemini API through the `google-genai` SDK.
 
-- **Ask:** `POST /api/v1/query` retrieves the most relevant policy chunks and has an LLM answer from them, with sources.
-- **Grow the dataset:** `POST /api/v1/documents/upload` stores `.md` / `.txt` files in Postgres and indexes them.
-- **Manage:** list, read and delete documents.
+## Project status
 
-| Doc | What's in it |
-|---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Project structure, how the RAG pipeline is integrated, every workflow step by step |
-| [docs/PACKAGES.md](docs/PACKAGES.md) | Every dependency, what it's for, and where it's used |
+Query, health, document listing, document detail, and document deletion routes are implemented. The registered document upload route is currently incomplete: its handler does not pass uploaded bytes and category to the ingestion service, and it returns during the first loop iteration. Do not rely on HTTP uploads until that route is fixed. Startup seeding from `data/policies/` is implemented.
+
+## Requirements
+
+- Python 3.11
+- [uv](https://docs.astral.sh/uv/)
+- A PostgreSQL database (the settings and `.env.example` use Neon)
+- A Google Gemini API key for generated answers
 
 ## Quick start
 
-### 1. Create the Neon database
-
-1. Create a project at [neon.tech](https://neon.tech).
-2. Open **Connect** in the dashboard and copy the connection string.
-
-Tables are created automatically on first startup. There's no manual schema step.
-
-### 2. Configure
+Create a database and copy its connection string from your database provider. From the repository root:
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in at least these three values:
+Set the required database URL and add the API keys in `.env`:
 
-| Variable | Meaning |
-|---|---|
-| `DATABASE_URL` | Neon connection string (`postgresql://...?sslmode=require`) |
-| `ADMIN_API_KEY` | Secret for upload/delete. Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
-| `LLM_API_KEY` | Key for your LLM provider (see [LLM providers](#llm-providers)) |
+```dotenv
+NEON_DATABASE_URL="postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require"
+ADMIN_API_KEY="generate-a-long-random-secret"
+LLM_API_KEY="your-google-genai-api-key"
+```
 
-### 3. Install and run
+Generate an admin key with:
+
+```bash
+uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Install dependencies and run the API from the repository root:
 
 ```bash
 uv sync
-uv run uvicorn policy_rag.api.main:app --reload
+uv run uvicorn policy_copilot_rag_service.api.main:app --reload
 ```
 
-Open **http://localhost:8000/docs** for interactive API docs.
+Interactive API documentation is at <http://127.0.0.1:8000/docs>.
 
-On startup the app creates tables, loads the sample files from `data/policies/` into Postgres (skipping any it already has), and builds the vector index. The first start downloads the embedding model (~90 MB).
+At startup the service creates database tables if needed, optionally seeds Markdown files from `data/policies/`, loads the embedding model, clears the in-memory vector collection, and indexes every document from PostgreSQL. The first run may download the embedding model. Keep a working network connection until that download completes.
 
-> **Run a single worker.** The vector index lives in each process's memory, so `--workers 2+` would give inconsistent search results. See [limitations](docs/ARCHITECTURE.md#9-limitations-and-scaling-path).
+Run one worker only. Chroma is in memory and each process would otherwise have its own independent index. `--reload` is intended for local development.
 
 ## API
 
-Base path: `/api/v1`. Auth for protected endpoints is the header `X-API-Key: <ADMIN_API_KEY>`.
+Protected endpoints require `X-API-Key: <ADMIN_API_KEY>`. If `ADMIN_API_KEY` is empty, protected operations return 503; a missing or incorrect key returns 401.
 
-| Method | Path | Auth | Purpose |
+| Method | Path | Access | Behavior |
 |---|---|---|---|
-| `POST` | `/query` | none | Ask a question |
-| `POST` | `/documents/upload` | admin | Upload one or more `.md`/`.txt` files |
-| `GET` | `/documents` | none | List documents (`limit`, `offset`, `category`) |
-| `GET` | `/documents/{id}` | none | One document with full text |
-| `DELETE` | `/documents/{id}` | admin | Remove from Postgres and the index |
-| `GET` | `/health` (no prefix) | none | DB connectivity and index size |
+| `GET` | `/api/v1/` | Public | Basic running status |
+| `POST` | `/api/v1/query` | Public | Retrieve context and generate an answer |
+| `GET` | `/api/v1/documents` | Public | List documents; supports `limit`, `offset`, and `category` |
+| `GET` | `/api/v1/documents/{doc_id}` | Public | Return document metadata and full content |
+| `POST` | `/api/v1/documents/upload` | Admin | Registered, but currently incomplete; see [Project status](#project-status) |
+| `DELETE` | `/api/v1/documents/{doc_id}` | Admin | Delete a document and its indexed chunks |
+| `GET` | `/health` | Public | Database connectivity, document count, and indexed chunk count |
 
-### Ask a question
+### Query
+
+Example request:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/query \
+curl -X POST http://127.0.0.1:8000/api/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "How much can I claim for a standing desk?"}'
+  -d '{"question":"How are documents retained?","top_k":3}'
 ```
 
-```json
-{
-  "answer": "Per the Remote Work Furniture Policy, up to $300 per item with manager approval...",
-  "sources": [
-    {
-      "document_id": 2,
-      "title": "Remote Work Furniture Policy",
-      "category": "reimbursement",
-      "chunk_id": "doc2_chunk_0",
-      "similarity": 0.6123,
-      "excerpt": "# Remote Work Furniture Policy ..."
-    }
-  ],
-  "model": "gemini-2.5-flash"
-}
-```
+The request requires a question between 3 and 1000 characters. `top_k` is optional (request range 1–10); retrieval is also capped by `MAX_TOP_K`. `category` is optional and filters results to an exact category. An empty category is treated as no filter.
 
-Optional body fields: `top_k` (1 to 10) and `category` (search only that category).
+Successful responses contain `answer`, `sources`, and `model`. Each source includes the document ID, title, category, chunk ID, similarity, and a text excerpt. Similarities are returned rounded to three decimal places. If retrieval returns no chunks, the service returns its fixed no-context message and an empty `sources` list without calling Gemini. If generation fails, the endpoint returns 503; inspect the server log for the upstream error details.
 
-### Upload documents
+Seed document categories are derived from their immediate parent directory under `data/policies/`, lowercased (for example, `03_privacy_and_data_protection`).
 
-```bash
-curl -X POST http://localhost:8000/api/v1/documents/upload \
-  -H "X-API-Key: $ADMIN_API_KEY" \
-  -F "category=hr" \
-  -F "files=@./parental-leave.md" \
-  -F "files=@./code-of-conduct.md"
-```
+### Documents
 
-```json
-{
-  "indexed": 1,
-  "skipped": 1,
-  "results": [
-    {"filename": "parental-leave.md", "status": "indexed", "detail": "",
-     "document": {"id": 6, "title": "Parental Leave", "category": "hr", "chunk_count": 4, "...": "..."}},
-    {"filename": "code-of-conduct.md", "status": "duplicate", "detail": "Same content as document 3", "document": {"...": "..."}}
-  ]
-}
-```
+`GET /api/v1/documents` returns `{ "total": number, "items": [...] }`. `limit` defaults to 20 and must be 1–100; `offset` defaults to 0 and must be non-negative. The optional category filter is trimmed and lowercased.
 
-Rules:
-
-- Allowed types: `.md`, `.markdown`, `.txt` (UTF-8). Max 1 MB per file, 10 files per request (configurable).
-- `category`: lowercase letters, digits, `-`, `_` (default `general`).
-- Title comes from the first `# Heading`, otherwise from the filename.
-- Identical content is detected by hash and skipped as `duplicate`.
-- Each file gets its own `status`: `indexed`, `duplicate` or `rejected`. The request returns **201** if at least one file was indexed, otherwise **200**.
+The upload path is not yet usable through HTTP. The ingestion service itself accepts `.md`, `.markdown`, and `.txt` files encoded as UTF-8, enforces the configured byte limit, rejects empty files, derives a title from the first `# Heading` (or filename), and detects duplicates by normalized-content hash. These validation rules describe the service layer, not a working upload API contract.
 
 ## Configuration
 
-Everything is an environment variable (or a line in `.env`). Defaults are in `src/policy_rag/settings.py`.
+Settings are read from environment variables or `.env`. The settings implementation is in `src/policy_copilot_rag_service/settings.py`.
 
-| Variable | Default | Meaning |
+| Variable | Default | Notes |
 |---|---|---|
-| `DATABASE_URL` | *required* | Neon connection string |
-| `ADMIN_API_KEY` | empty | Empty disables upload/delete (503) |
-| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed frontends |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `800` / `150` | Characters per chunk / shared between chunks |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model |
-| `TOP_K` / `MAX_TOP_K` | `3` / `10` | Default and maximum chunks retrieved |
-| `MIN_SIMILARITY` | `0.0` | Drop chunks below this cosine similarity (0 = off) |
-| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | Gemini / `gemini-2.5-flash` / empty | LLM provider |
-| `MAX_UPLOAD_BYTES` / `MAX_FILES_PER_UPLOAD` | `1000000` / `10` | Upload limits |
-| `SEED_ON_STARTUP` | `true` | Load `data/policies/` at startup |
-| `LOG_LEVEL` | `INFO` | Python logging level |
+| `NEON_DATABASE_URL` | Required | PostgreSQL connection URL. The application converts `postgres://` and `postgresql://` schemes to the Psycopg 3 SQLAlchemy driver. |
+| `ADMIN_API_KEY` | Empty | Shared key for upload and delete routes. |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` | Passed to the CORS middleware by the application. |
+| `DATA_DIR` | `data/policies/` | Directory containing seed Markdown documents. |
+| `SEED_ON_STARTUP` | `true` | Seed Markdown documents on application startup. |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `400` / `100` | Markdown chunk size and overlap, in characters. |
+| `EMBEDDING_MODEL` | `all-MiniLm-L6-v2` | Sentence Transformers model used for documents and queries. |
+| `COLLECTION_NAME` | `policy_documents` | Chroma collection name. |
+| `SIMILARITY_METRIC` | `cosine` | Chroma distance metric. |
+| `TOP_K` / `MAX_TOP_K` | `3` / `6` | Default retrieval count and service-side maximum. |
+| `MIN_SIMILARITY` | `0.0` | Discards retrieved chunks below this similarity. |
+| `LLM_API_KEY` | Empty | Google Gemini API key used by `google-genai`. |
+| `LLM_MODEL` | `gemini-3.8-flash` | Gemini model name passed to the SDK; confirm the name is available to your API key. |
+| `LLM_MAX_TOKENS` | `1000` | Maximum generated output tokens. |
+| `LLM_TIMEOUT_SECONDS` | `30.0` | Defined in settings, but not currently passed to the Google GenAI client. |
+| `LLM_BASE_URL` | Gemini OpenAI-compatible URL | Defined in settings but not used by the active Google GenAI client. Changing it does not switch providers. |
+| `MAX_UPLOAD_BYTES` / `MAX_FILES_PER_UPLOAD` | `1000000` / `10` | Ingestion and upload limits; the HTTP upload route is currently incomplete. |
+| `LOG_LEVEL` | `INFO` | Logging level configured at startup. |
 
-If you change `CHUNK_SIZE`, `CHUNK_OVERLAP` or `EMBEDDING_MODEL`, restart the app. The index is rebuilt at startup, so the change applies to all documents.
+The active generation client is Google Gemini. Although `LLM_BASE_URL` exists in settings, the implementation does not currently support switching to OpenAI-compatible providers by changing environment variables alone.
 
-### LLM providers
+Changing chunking or embedding settings requires a restart. Startup rebuilds the in-memory vector index from all documents stored in PostgreSQL.
 
-Any OpenAI-compatible endpoint works. Change three variables:
+## Data and implementation
 
-| Provider | `LLM_BASE_URL` | `LLM_MODEL` (example) |
-|---|---|---|
-| Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | `gemini-2.5-flash` |
-| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
-| OpenRouter | `https://openrouter.ai/api/v1` | any `:free` model |
-| Ollama (local) | `http://localhost:11434/v1` | `llama3.2:3b` (key can be any value) |
+- `data/policies/` contains the Markdown seed corpus. Subdirectory names become document categories.
+- PostgreSQL is the durable source of truth for full document text and metadata.
+- Chroma stores embedded chunks in process memory; it is derived data and is rebuilt at every startup.
+- The embedding model is loaded once per process and is used for both document chunks and query text.
+- Database tables are created with SQLAlchemy `create_all`; no migration system is currently configured.
 
-Model names change often, so check the provider's docs for current ones.
+Main code areas:
 
-## Tests
-
-```bash
-uv sync                # installs the dev group (pytest, httpx)
-uv run pytest
+```text
+src/policy_copilot_rag_service/
+  settings.py
+  api/             FastAPI app, routes, schemas, database, and ingestion service
+  rag/             chunking, embeddings, retrieval, prompt assembly, generation
 ```
 
-The tests use SQLite, fake embeddings and a fake LLM, so they need no Neon connection, model download or API key. They cover auth, upload, duplicate handling, validation, search, filtering and delete.
+## Development checks
+
+Install the project's dependencies, including the development dependency group:
+
+```bash
+uv sync
+```
+
+`pytest` and `httpx` are listed as development dependencies, but no automated test files are currently included in this repository.
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
+| Symptom | Check |
 |---|---|
-| `ValidationError: database_url Field required` at startup | `.env` missing or not in the directory you run from |
-| `OperationalError: ... SSL` / connection refused | Keep `?sslmode=require` in the Neon URL |
-| First request after idle is slow or fails once | Neon scales idle compute to zero; it wakes within a second or two. The pool pre-pings, so retry |
-| `503 ADMIN_API_KEY is not configured` | Set `ADMIN_API_KEY` in `.env` |
-| `502 The language model is unavailable` | Check `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, and the provider's rate limit. Details are in the server log |
-| Answer says nothing was found | The index is empty, the category filter matched nothing, or `MIN_SIMILARITY` is too high |
-| `operator torchvision::nms does not exist` | torch/torchvision mismatch. Add both as direct dependencies with the CPU index (see `pyproject.toml`) |
+| Settings validation says `neon_database_url` is missing | Create `.env` in the directory where you run the service and set `NEON_DATABASE_URL`. |
+| PostgreSQL connection or SSL error | Verify the database URL, credentials, network access, and provider-required SSL parameters such as `sslmode=require`. |
+| First startup fails while downloading the embedding model | Check network stability and retry; the model must be available locally before indexing can complete. |
+| Admin operation returns 503 | Set a non-empty `ADMIN_API_KEY` and restart the service. |
+| Query returns the no-context fallback | Check that the index has chunks, the category matches exactly, and `MIN_SIMILARITY` is not excluding results. |
+| Query endpoint returns 503 | Check `LLM_API_KEY`, the configured Gemini model name, API access/quota, and the detailed `LLM call failed` server log. |
+| Chroma logs telemetry capture errors | These are telemetry integration errors; they are separate from retrieval and generation failures. |
