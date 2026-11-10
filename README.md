@@ -4,7 +4,7 @@ A Python 3.11 FastAPI service for querying a document collection with retrieval-
 
 ## Project status
 
-Query, health, document listing, document detail, and document deletion routes are implemented. The registered document upload route is currently incomplete: its handler does not pass uploaded bytes and category to the ingestion service, and it returns during the first loop iteration. Do not rely on HTTP uploads until that route is fixed. Startup seeding from `data/policies/` is implemented.
+Query, health, document listing, document detail, document upload, and document deletion routes are implemented. Startup seeding from `data/policies/` is also implemented.
 
 ## Requirements
 
@@ -58,7 +58,7 @@ Protected endpoints require `X-API-Key: <ADMIN_API_KEY>`. If `ADMIN_API_KEY` is 
 | `POST` | `/api/v1/query` | Public | Retrieve context and generate an answer |
 | `GET` | `/api/v1/documents` | Public | List documents; supports `limit`, `offset`, and `category` |
 | `GET` | `/api/v1/documents/{doc_id}` | Public | Return document metadata and full content |
-| `POST` | `/api/v1/documents/upload` | Admin | Registered, but currently incomplete; see [Project status](#project-status) |
+| `POST` | `/api/v1/documents/upload` | Admin | Upload and index one or more `.md`, `.markdown`, or `.txt` files |
 | `DELETE` | `/api/v1/documents/{doc_id}` | Admin | Delete a document and its indexed chunks |
 | `GET` | `/health` | Public | Database connectivity, document count, and indexed chunk count |
 
@@ -82,7 +82,7 @@ Seed document categories are derived from their immediate parent directory under
 
 `GET /api/v1/documents` returns `{ "total": number, "items": [...] }`. `limit` defaults to 20 and must be 1–100; `offset` defaults to 0 and must be non-negative. The optional category filter is trimmed and lowercased.
 
-The upload path is not yet usable through HTTP. The ingestion service itself accepts `.md`, `.markdown`, and `.txt` files encoded as UTF-8, enforces the configured byte limit, rejects empty files, derives a title from the first `# Heading` (or filename), and detects duplicates by normalized-content hash. These validation rules describe the service layer, not a working upload API contract.
+To upload through Swagger, open `POST /api/v1/documents/upload`, select **Try it out**, choose one or more files in the `files` field, enter the `X-API-Key` header value, and execute the request. The optional `category` defaults to `general`; `library_id` may be supplied to associate the uploads with a library. The endpoint accepts `.md`, `.markdown`, and `.txt` files encoded as UTF-8, enforces the configured byte limit, rejects empty files, derives a title from the first `# Heading` (or filename), and detects duplicates by normalized-content hash. Each file receives an `indexed`, `duplicate`, or `rejected` result.
 
 ## Configuration
 
