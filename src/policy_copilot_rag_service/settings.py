@@ -2,7 +2,7 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings,SettingsConfigDict
 from functools import lru_cache
-from pydantic import field_validator
+from pydantic import Field,field_validator
 from typing import List
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=BASE_DIR / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     neon_database_url: str
 
     admin_api_key: str = ""
-    cors_allowed_origins: str = "http://localhost:3000"
+    cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     max_upload_bytes: int = 1000000
     max_files_per_upload:  int = 10
     log_level: str = "INFO"
@@ -39,10 +39,10 @@ class Settings(BaseSettings):
     min_similarity: float = 0.0
 
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    llm_model: str = "gemini-2.5-flash"
+    llm_model: str = "gemini-3.1-flash-lite"
     llm_api_key: str = ""
     llm_max_tokens: int = 1000
-    llm_timeout_seconds: float = 30.0
+    llm_timeout_seconds: float = Field(default=60.0,gt=0,allow_inf_nan=False)
 
     @field_validator("neon_database_url")
     @classmethod
@@ -51,8 +51,6 @@ class Settings(BaseSettings):
             db_url = "postgresql" + db_url[len("postgres://"):]
         if db_url.startswith("postgresql://"):
             db_url = "postgresql+psycopg://" + db_url[len("postgresql://"):]
-
-        print(db_url)
 
         return db_url
 
