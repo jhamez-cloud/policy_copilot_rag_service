@@ -34,7 +34,7 @@ src/policy_copilot_rag_service/
 │       ├── models.py           Document, Library, ChatSession ORM models
 │       ├── repository.py       SQL reads/writes; callers commit transactions
 │       ├── session.py          engine, connection pool, schema initialization
-│       ├── migrations.py       additive upgrades for existing document tables
+│       ├── migrations.py       additive document/library schema upgrades
 │       └── tests/              schema upgrade and library deletion checks
 ├── rag/
 │   ├── chunking.py             Markdown splitting and chunk metadata
@@ -82,14 +82,14 @@ Pydantic supplies API schemas through the FastAPI/settings dependency stack. The
 | Model / table | Stored information and relationships |
 | --- | --- |
 | `Document` / `documents` | ID, title, category, filename, full text, unique SHA-256 content hash, source, chunk count, creation time, nullable indexed `library_id`. |
-| `Library` / `libraries` | ID, name, creation time, and ORM relationships to its documents and sessions. Document membership is represented by `documents.library_id`. |
+| `Library` / `libraries` | ID, name, creation time, nullable unique internal `system_key`, and ORM relationships to documents/sessions. API metadata exposes derived `is_system`; document membership uses `documents.library_id`. |
 | `ChatSession` / `sessions` | ID, creation time, and nullable indexed `library_id`. A session persists a selected library; this model does not store a conversation transcript. |
 
 A document belongs to at most one library. Adding an existing document to another library moves its membership. Removing membership sets `library_id` to `NULL`, which represents uncategorized documents independently of their `category` value.
 
-Both document and session foreign keys use `ON DELETE SET NULL`. Deleting a library preserves its documents and sessions; the documents become uncategorized, and surviving sessions can select a new library. Software policies are identified by `source == "seed"` and remain globally searchable regardless of library membership.
+Both document and session foreign keys use `ON DELETE SET NULL`. Deleting a user library preserves its documents and sessions; the documents become uncategorized, and surviving sessions can select a new library. Software policies are identified by `source == "seed"`, belong to the built-in **Software policy** library, and remain globally searchable in every query. The built-in library and its documents reject all admin mutations with 403, including moves or permanent deletion through global document endpoints. Ordinary user libraries remain editable.
 
-`init_db()` creates missing tables, then runs the idempotent upgrade in `api/db/migrations.py` to add the document-library foreign key and index to older schemas. Existing document IDs and content are preserved, with no library assigned. PostgreSQL schema initialization uses a transaction advisory lock; SQLite connections enable foreign keys. The project has no Alembic configuration or revision history.
+`init_db()` creates missing tables, then runs the idempotent upgrade in `api/db/migrations.py` to add the document-library foreign key/index and unique nullable library system key to older schemas. It creates the built-in library and attaches all previously seeded documents in the same transaction, even when directory seeding is disabled. Existing document IDs, content, categories, and uploaded-document memberships are preserved. PostgreSQL schema initialization uses a transaction advisory lock; SQLite connections enable foreign keys. The project has no Alembic configuration or revision history.
 
 ## API surface and services
 
@@ -117,8 +117,8 @@ All application routes below use `/api/v1`; `/health` is outside that prefix. In
 
 ## Startup and indexing
 
-1. `api/main.py` loads settings and initializes the SQL schema, including the library upgrade.
-2. A `RagPipeline` creates its Chroma collection. If `SEED_ON_STARTUP` is enabled, ingestion reads sorted `DATA_DIR/**/*.md`, validates the text, and inserts new hashes with `source="seed"`. The immediate parent directory supplies the category. Matching existing content is marked as a seed, including content uploaded earlier.
+1. `api/main.py` loads settings and initializes the SQL schema, including upgrades and the built-in Software policy library. Existing seeded documents are assigned to that library.
+2. A `RagPipeline` creates its Chroma collection. If `SEED_ON_STARTUP` is enabled, ingestion reads sorted `DATA_DIR/**/*.md`, validates the text, and inserts new hashes with `source="seed"` into the built-in library. The immediate parent directory supplies the category. Matching existing content is marked as a seed and moved into the built-in library, including content uploaded earlier. Repeated runs use the same stable library ID; a missing directory still leaves the library available.
 3. The cached Sentence Transformer model is loaded once per process.
 4. `rebuild_index()` resets Chroma and indexes every SQL document, preserving its source marker and writing the resulting chunk count back to SQL.
 5. The pipeline is stored on `app.state.pipeline`, then requests are accepted. Shutdown disposes the SQL engine.
@@ -150,7 +150,7 @@ An unknown session returns 404. Explicit empty ID lists produce no candidates; d
 3. Independently search policy IDs across all policy categories.
 4. Use `min(requested top_k or TOP_K, MAX_TOP_K)` for each corpus. Merge by similarity, deduplicate chunk IDs, and discard hits below `MIN_SIMILARITY`. A response can contain up to twice the capped per-corpus count. With the default cosine metric, similarity is `1 - distance`.
 5. If no hits remain, return the no-context answer without calling Gemini. Otherwise assemble numbered excerpts labelled as uploaded documents or software policies and generate a grounded answer.
-6. Return answer, model, selected session/library IDs, and sources containing document/chunk IDs, title, category, source marker, similarity, and excerpt. Generation failures return 503.
+6. Return answer, model, selected session/library IDs, and sources containing document/chunk IDs, title, category, source marker, similarity, and excerpt. Generation failures return 503; provider timeouts return 504.
 
 ## Running and validation
 
@@ -163,7 +163,7 @@ uv run uvicorn policy_copilot_rag_service.api.main:app --reload
 
 Use one worker: Chroma is process-local, and uploads do not synchronize separate workers or replicas. Startup re-embeds all SQL documents. The console script named `policy-copilot-rag-service` currently prints a greeting; the Uvicorn command starts the API. No Docker, CI, or deployment manifest is configured in the repository.
 
-Settings load environment variables and `.env` relative to the launch directory. Important setting groups are `NEON_DATABASE_URL`, `ADMIN_API_KEY`, `DATA_DIR`/`SEED_ON_STARTUP`, chunking and embedding settings, retrieval limits, upload limits, and `LLM_*`. Generation uses `google-genai`; the defined OpenAI-compatible base URL and timeout settings are not passed to that client. Ship the external `data/policies/` corpus with a deployment or set `DATA_DIR` explicitly; it is outside the package's default wheel source tree.
+Settings load environment variables and `.env` from the backend repository root. Important setting groups are `NEON_DATABASE_URL`, `ADMIN_API_KEY`, `DATA_DIR`/`SEED_ON_STARTUP`, chunking and embedding settings, retrieval limits, upload limits, and `LLM_*`. Generation uses `google-genai`; `LLM_TIMEOUT_SECONDS` defaults to 60 seconds and is converted to SDK milliseconds with automatic retries disabled. The OpenAI-compatible base URL is not used by that client. Ship the external `data/policies/` corpus with a deployment or set `DATA_DIR` explicitly; it is outside the package's default wheel source tree.
 
 Tests live under package-local `tests/`, `rag/tests/`, and `api/db/tests/`. API fixtures use SQLite with foreign keys, real Chroma, deterministic embeddings, and a fake generator. From the repository root, collect and run package tests with:
 

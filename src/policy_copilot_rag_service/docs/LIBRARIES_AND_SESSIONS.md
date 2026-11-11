@@ -4,14 +4,27 @@ A document belongs to at most one library. `documents.library_id` references
 `libraries.id`; `NULL` means **uncategorized**. The existing `category` remains
 the document's topic and is independent of its library.
 
-Deleting a library preserves its documents, text, and indexed chunks and sets
+Deleting a user-created library preserves its documents, text, and indexed chunks and sets
 their library links to `NULL`. Existing sessions also survive with a `NULL`
 library link. Documents can subsequently be assigned to another library.
 
 Software policy documents are identified by `source="seed"`. They are searched
-for every API query regardless of library membership. Seeding also recognizes
+for every API query and belong to the built-in **Software policy** library. Seeding also recognizes
 policy content uploaded before startup and marks that existing document as a
-software policy instead of creating a duplicate.
+software policy instead of creating a duplicate, moving it into the built-in library.
+
+Startup creates this library automatically, even when `SEED_ON_STARTUP=false`
+or the seed directory is missing, and attaches every already-seeded document.
+Repeated startups and later seed files reuse the same library ID. Library DTOs
+include `is_system: true` for the built-in library and `false` for user libraries;
+clients must use this flag instead of recognizing the name. The underlying
+nullable unique `system_key` is internal and cannot be supplied by API clients.
+
+The built-in library is read-only: rename, delete, upload, and document membership
+changes return 403 even with an admin key. Seeded documents cannot be moved into
+another library or deleted through `/documents/{id}`. A mixed membership batch
+containing a seeded document rejects the entire batch. Users can read documents,
+open the built-in library, select it for a session, and query its policies.
 
 ## Typical workflow
 
@@ -76,7 +89,7 @@ requests require 1–1000 distinct positive document IDs and validate the entire
 batch before changing any memberships. Assigning a document moves it from its
 previous library. Removing a document from a library it does not belong to
 returns 404. Duplicate uploads return the existing document and preserve its
-current membership; use the membership endpoint to move it.
+current membership; use the membership endpoint to move an editable document.
 
 For backward compatibility, `/query` without `session_id` searches uncategorized
 documents plus software policies. A session whose library was deleted searches
@@ -92,6 +105,10 @@ foreign keys use `ON DELETE SET NULL`. The additive upgrade runs inside a
 transaction; a PostgreSQL advisory lock serializes concurrent app startup.
 SQLite connections also enable foreign key enforcement. Startup can be run
 again without changing existing document IDs, content, or categories.
+The same transaction adds `libraries.system_key` and its unique index, creates
+the built-in library, and backfills all seed memberships. Uploaded documents
+keep their existing memberships. A unique-key upsert prevents duplicate system
+libraries when separate seed jobs start concurrently.
 
 Tests use SQLite and real Chroma collections with deterministic embeddings;
 they require no model download, LLM call, or Neon connection. From the repository
