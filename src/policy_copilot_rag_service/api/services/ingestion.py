@@ -11,11 +11,12 @@ from ...settings import get_settings
 from ...rag.pipeline import RagPipeline
 from ..db.models import Document
 from ..db import repository as repo
+from .extraction import SUPPORTED_EXTENSIONS, extract_text
 
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_EXTENSIONS = {".md",".txt",".markdown"}
+ALLOWED_EXTENSIONS = set(SUPPORTED_EXTENSIONS)
 
 @dataclass(frozen=True)
 class IngestOutcome:
@@ -40,51 +41,47 @@ def content_hash(content:str):
 def prepare(filename:str,raw:bytes) -> tuple[str,str,str]:
     '''Validation of uploaded files and documents to get valid data'''
     settings = get_settings()
-    file_extension = Path(filename).suffix.lower()
-
-    if file_extension not in ALLOWED_EXTENSIONS:
-        raise ValueError(f"Unsupported File Type or Extension: {file_extension}. Allowed: '.md','.markdown','.txt'")
-
     if len(raw) > settings.max_upload_bytes:
-        raise ValueError("File size too large. Compress and upload again.")
+        raise ValueError(f"File exceeds the {settings.max_upload_bytes:,}-byte upload limit. Split it and upload again.")
 
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError as err:
-        raise ValueError(f"Could not decode file content: {err}")
-
-    content = text.replace("\r\n","\n").strip()
-
-    if not content:
-        raise ValueError("File content is empty.")
+    content = extract_text(filename, raw, max_chars=settings.max_extracted_chars)
 
     return content,derive_title(content,filename),content_hash(content)
 
 
-def ingest_file(db:Session,pipeline:RagPipeline,filename:str,raw:bytes,category:str) -> IngestOutcome:
+def ingest_file(db:Session,pipeline:RagPipeline,filename:str,raw:bytes,category:str,*,library_id:int | None = None) -> IngestOutcome:
     '''Documentation String'''
+    if library_id is not None:
+        library = repo.get_library_by_id(db, library_id)
+        if library is None:
+            raise ValueError(f"Library with ID {library_id} does not exist")
+        repo.require_mutable_library(library)
     try:
         content,title,digest = prepare(filename,raw)
-    except Exception as err:
+    except ValueError as err:
         return IngestOutcome(filename,"rejected",str(err))
 
-    exists = repo.get_doc_by_hash(db,content_hash(content))
+    exists = repo.get_doc_by_hash(db,digest)
 
     if exists:
         return IngestOutcome(filename,"duplicate",f"Same content as {exists.id}",exists)
 
     try:
         doc = repo.add_doc(db,title=title, category=category, filename=filename[:255],
-            content=content, content_hash=digest, source="upload", chunk_count=0)
+            content=content, content_hash=digest, source="upload", chunk_count=0,library_id=library_id)
     except IntegrityError:
         db.rollback()
-        return IngestOutcome(filename,"duplicate","Same document was already uploaded concurrently.")
+        exists = repo.get_doc_by_hash(db,digest)
+        if exists is not None:
+            return IngestOutcome(filename,"duplicate","Same document was already uploaded concurrently.",exists)
+        raise
 
     doc_id = doc.id
     try:
-        chunk_count = pipeline.index_documents(doc_id,title,category,content)
+        chunk_count = pipeline.index_documents(doc_id,title,category,content,source=doc.source)
+        doc.chunk_count = chunk_count
         db.commit()
-    except:
+    except Exception:
         db.rollback()
         pipeline.remove_document(doc_id)
         logger.exception("Indexing failed for %s, upload rolled back",filename)
@@ -111,8 +108,10 @@ def seed_from_directory(db:Session,directory:Path) -> int:
     '''
 
     directory = Path(directory)
+    library = repo.ensure_system_library(db)
     if not directory.exists():
         logger.warning("Seed directory %s does not exist, skipping...",directory)
+        db.commit()
         return 0
 
     seeded = 0
@@ -123,16 +122,28 @@ def seed_from_directory(db:Session,directory:Path) -> int:
             logger.warning("Skipping seed file %s:%s",path,err)
             continue
 
-        if repo.get_doc_by_hash(db,digest):
+        existing = repo.get_doc_by_hash(db,digest)
+        if existing is not None:
+            # Policy identity is content-based even if this content was uploaded first.
+            existing.source = "seed"
+            existing.library = library
             continue
 
         relative_path = path.relative_to(directory)
         category = relative_path.parent.name.lower() if relative_path.parent.name else "general"
 
-        repo.add_doc(db, title=title, category=category, filename=path.name,
-            content=content, content_hash=digest, source="seed", chunk_count=0)
-
-        seeded += 1
+        try:
+            with db.begin_nested():
+                repo.add_doc(db, title=title, category=category, filename=path.name,
+                    content=content, content_hash=digest, source="seed", chunk_count=0, library_id=library.id)
+        except IntegrityError:
+            existing = repo.get_doc_by_hash(db,digest)
+            if existing is None:
+                raise
+            existing.source = "seed"
+            existing.library = library
+        else:
+            seeded += 1
 
     db.commit()
     return seeded
@@ -146,7 +157,8 @@ def rebuild_index(pipeline:RagPipeline,db:Session) -> tuple[int,int]:
 
     total_chunks = 0
     for doc in docs:
-        chunk_count = pipeline.index_documents(doc.id,doc.title,doc.category,doc.content)
+        chunk_count = pipeline.index_documents(doc.id,doc.title,doc.category,doc.content,source=doc.source)
+        doc.chunk_count = chunk_count
         total_chunks += chunk_count
 
     db.commit()
