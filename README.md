@@ -12,6 +12,7 @@ Query, health, document listing, document detail, document upload, and document 
 - [uv](https://docs.astral.sh/uv/)
 - A PostgreSQL database (the settings and `.env.example` use Neon)
 - A Google Gemini API key for generated answers
+- LibreOffice for legacy `.ppt` uploads and as a fallback for some `.doc` files; `antiword` is also supported for `.doc` (Debian/Ubuntu: `sudo apt-get install antiword libreoffice-writer`)
 
 ## Quick start
 
@@ -35,14 +36,14 @@ Generate an admin key with:
 uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Install dependencies and run the API from the repository root:
+Install dependencies and start the API from the repository root:
 
 ```bash
 uv sync
-uv run uvicorn policy_copilot_rag_service.api.main:app --reload
+uv run policy-copilot-rag-service
 ```
 
-Interactive API documentation is at <http://127.0.0.1:8000/docs>.
+The service listens on `0.0.0.0:8000` by default. Use `uv run policy-copilot-rag-service --host 127.0.0.1 --port 8000 --reload` for local development with automatic reload. Interactive API documentation is at <http://127.0.0.1:8000/docs>.
 
 At startup the service creates database tables if needed, optionally seeds Markdown files from `data/policies/`, loads the embedding model, clears the in-memory vector collection, and indexes every document from PostgreSQL. The first run may download the embedding model. Keep a working network connection until that download completes.
 
@@ -58,7 +59,8 @@ Protected endpoints require `X-API-Key: <ADMIN_API_KEY>`. If `ADMIN_API_KEY` is 
 | `POST` | `/api/v1/query` | Public | Retrieve context and generate an answer |
 | `GET` | `/api/v1/documents` | Public | List documents; supports `limit`, `offset`, and `category` |
 | `GET` | `/api/v1/documents/{doc_id}` | Public | Return document metadata and full content |
-| `POST` | `/api/v1/documents/upload` | Admin | Upload and index one or more `.md`, `.markdown`, or `.txt` files |
+| `POST` | `/api/v1/documents/upload` | Admin | Extract and index `.pdf`, `.docx`, `.doc`, `.pptx`, `.ppt`, `.csv`, `.txt`, `.md` or `.markdown` files |
+| `GET` | `/api/v1/documents/upload-options` | Public | Available file extensions and configured upload/extraction limits |
 | `DELETE` | `/api/v1/documents/{doc_id}` | Admin | Delete a document and its indexed chunks |
 | `GET` | `/health` | Public | Database connectivity, document count, and indexed chunk count |
 
@@ -82,7 +84,11 @@ Seed document categories are derived from their immediate parent directory under
 
 `GET /api/v1/documents` returns `{ "total": number, "items": [...] }`. `limit` defaults to 20 and must be 1–100; `offset` defaults to 0 and must be non-negative. The optional category filter is trimmed and lowercased.
 
-To upload through Swagger, open `POST /api/v1/documents/upload`, select **Try it out**, choose one or more files in the `files` field, enter the `X-API-Key` header value, and execute the request. The optional `category` defaults to `general`; `library_id` may be supplied to associate the uploads with a library. The endpoint accepts `.md`, `.markdown`, and `.txt` files encoded as UTF-8, enforces the configured byte limit, rejects empty files, derives a title from the first `# Heading` (or filename), and detects duplicates by normalized-content hash. Each file receives an `indexed`, `duplicate`, or `rejected` result.
+To upload through Swagger, open `POST /api/v1/documents/upload`, select **Try it out**, choose one or more files in the `files` field, enter the `X-API-Key` header value, and execute the request. The optional `category` defaults to `general`; `library_id` may be supplied to associate the uploads with a library. The endpoint accepts `.pdf`, `.docx`, `.doc`, `.pptx`, `.ppt`, `.csv`, `.txt`, `.md` and `.markdown`. It extracts readable text before normalization, title derivation, duplicate hashing, PostgreSQL storage and Chroma indexing. The original filename is retained; original binaries are not stored. Each file receives an `indexed`, `duplicate`, or `rejected` result, so a damaged file does not block other valid files.
+
+PDF conversion uses `pypdf`, DOCX uses `python-docx`, PPTX uses `python-pptx`, and CSV uses Python's standard CSV reader. DOCX preserves paragraph/table reading order and headings. PowerPoint extraction includes slide text, grouped text, tables and speaker notes; legacy `.ppt` files are converted to `.pptx` with LibreOffice before extraction. CSV rows include their column labels; UTF-8 and BOM-marked UTF-16 text are supported. Legacy DOC conversion uses a temporary file and `antiword` without a shell, with a LibreOffice fallback in an isolated profile for short or RTF-based Word files. Office conversion has a 30-second timeout. `GET /api/v1/documents/upload-options` reports available extensions and limits; `.doc` is omitted when both `antiword` and LibreOffice are unavailable, and `.ppt` is omitted when LibreOffice is unavailable.
+
+Scanned PDFs and image-only documents require OCR before upload. Embedded images are not extracted, and password-protected documents are rejected with a per-file explanation. PDFs are capped at 1,000 pages; Office archives at 50,000,000 expanded bytes and 5,000 entries. Extracted text defaults to a 2,000,000-character limit. Equivalent normalized text is a duplicate even when uploaded in different formats.
 
 ## Configuration
 
@@ -106,7 +112,8 @@ Settings are read from environment variables or `.env`. The settings implementat
 | `LLM_MAX_TOKENS` | `1000` | Maximum generated output tokens. |
 | `LLM_TIMEOUT_SECONDS` | `30.0` | Defined in settings, but not currently passed to the Google GenAI client. |
 | `LLM_BASE_URL` | Gemini OpenAI-compatible URL | Defined in settings but not used by the active Google GenAI client. Changing it does not switch providers. |
-| `MAX_UPLOAD_BYTES` / `MAX_FILES_PER_UPLOAD` | `1000000` / `10` | Ingestion and upload limits; the HTTP upload route is currently incomplete. |
+| `MAX_UPLOAD_BYTES` / `MAX_FILES_PER_UPLOAD` | `20000000` / `10` | Maximum original file bytes and files per multipart request; environment overrides apply. |
+| `MAX_EXTRACTED_CHARS` | `2000000` | Maximum readable text characters per document before indexing. |
 | `LOG_LEVEL` | `INFO` | Logging level configured at startup. |
 
 The active generation client is Google Gemini. Although `LLM_BASE_URL` exists in settings, the implementation does not currently support switching to OpenAI-compatible providers by changing environment variables alone.
@@ -138,7 +145,13 @@ Install the project's dependencies, including the development dependency group:
 uv sync
 ```
 
-`pytest` and `httpx` are listed as development dependencies, but no automated test files are currently included in this repository.
+Run the offline storage, ingestion, retrieval and API tests from `src/policy_copilot_rag_service`:
+
+```bash
+../../.venv/bin/python -m pytest tests api/db/tests rag/tests -q
+```
+
+`tests/test_document_formats.py` exercises real PDF, DOCX, DOC, PPTX and CSV conversion, mixed multipart uploads, citations, cross-format deduplication, invalid/encrypted files and extraction limits. The legacy DOC fixture was generated with LibreOffice and is converted using `antiword`.
 
 ## Troubleshooting
 
