@@ -23,7 +23,15 @@ def _get_splitter():
     return splitter
 
 
-def chunk_document(doc_id:int,title:str,category:str,content:str) -> List[Chunk]:
+def chunk_document(
+    doc_id: int,
+    title: str,
+    category: str,
+    content: str,
+    *,
+    source: str = "upload",
+) -> List[Chunk]:
+    """Split a document, retaining its SQL source (upload or seed) in metadata."""
     chunks = [chunk for chunk in _get_splitter().split_text(content) if chunk.strip()]
 
     return [Chunk(
@@ -33,6 +41,7 @@ def chunk_document(doc_id:int,title:str,category:str,content:str) -> List[Chunk]
             "doc_id": doc_id,
             "title": title,
             "category": category,
-            "chunk_index": i
+            "chunk_index": i,
+            "source": source,
         }
     ) for i,chunk in enumerate(chunks,1)]
