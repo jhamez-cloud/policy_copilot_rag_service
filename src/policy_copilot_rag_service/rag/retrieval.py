@@ -11,6 +11,7 @@ class Hit:
     category: str
     text: str
     similarity: float
+    source: str = "upload"
 
 
 class VectorDatabase:
@@ -62,10 +63,34 @@ class VectorDatabase:
     def count(self) -> int:
         return self._collection.count()
 
-    def retrieve(self,embedding:list[float], top_k:int, category:str | None = None) -> list[Hit]:
-        '''Documentation String'''
+    def retrieve(
+        self,
+        embedding: list[float],
+        top_k: int,
+        category: str | None = None,
+        *,
+        document_ids: list[int] | None = None,
+    ) -> list[Hit]:
+        """Retrieve within the supplied document IDs; None keeps legacy scope.
 
-        where = {"category":category} if category else None
+        An explicit empty list has no searchable documents and never queries
+        Chroma. A category filter intersects the document scope when supplied.
+        """
+        if top_k <= 0 or (document_ids is not None and not document_ids):
+            return []
+
+        filters = []
+        if document_ids is not None:
+            filters.append({"doc_id": {"$in": document_ids}})
+        if category:
+            filters.append({"category": category})
+
+        where = None
+        if len(filters) == 1:
+            where = filters[0]
+        elif filters:
+            where = {"$and": filters}
+
         if where:
             searchable = len(self._collection.get(where=where, include=[])["ids"])
         else:
@@ -86,7 +111,8 @@ class VectorDatabase:
             title=metadata["title"],
             category=metadata["category"],
             text=text,
-            similarity=1-distance
+            similarity=1-distance,
+            source=metadata.get("source", "upload"),
         ) for chunk_id,distance,text,metadata in zip(
             query_result["ids"][0],
             query_result["distances"][0],
